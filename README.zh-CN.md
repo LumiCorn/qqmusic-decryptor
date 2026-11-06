@@ -2,12 +2,15 @@
 # 🎵 QQ Music 解密工具
 
 [![GitHub release](https://img.shields.io/github/v/release/LumiCorn/qqmusic-decryptor)](https://github.com/LumiCorn/qqmusic-decryptor/releases)
+[![Upstream](https://img.shields.io/badge/upstream-FountainChan%2Fqqmusic--decryptor-blue)](https://github.com/FountainChan/qqmusic-decryptor)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![Frida](https://img.shields.io/badge/frida-16.7.10-green)](https://frida.re/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 > 🎯 批量解密 QQ 音乐加密音频文件（`.mflac`/`.mgg`）为标准格式（`.flac`/`.ogg`），并补充专辑元数据，一站式全自动搞定。
+
+> 📦 **上游项目**：本仓库基于 [FountainChan/qqmusic-decryptor](https://github.com/FountainChan/qqmusic-decryptor) 继续开发；GUI 部分源自 [strelitzia-reg/qqmusic-decryptor](https://github.com/strelitzia-reg/qqmusic-decryptor)。原仓库同时保留为 git remote `upstream`。
 
 **[English Documentation](README.md)**
 

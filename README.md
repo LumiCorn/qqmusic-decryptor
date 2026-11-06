@@ -2,12 +2,15 @@
 # 🎵 QQ Music Decryptor
 
 [![GitHub release](https://img.shields.io/github/v/release/LumiCorn/qqmusic-decryptor)](https://github.com/LumiCorn/qqmusic-decryptor/releases)
+[![Upstream](https://img.shields.io/badge/upstream-FountainChan%2Fqqmusic--decryptor-blue)](https://github.com/FountainChan/qqmusic-decryptor)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![Frida](https://img.shields.io/badge/frida-16.7.10-green)](https://frida.re/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 > 🎯 Batch decrypt QQ Music encrypted audio files (`.mflac`/`.mgg`) to standard formats (`.flac`/`.ogg`), then supplement album metadata — all in one automated workflow.
+
+> 📦 **Upstream**: this repository continues development from [FountainChan/qqmusic-decryptor](https://github.com/FountainChan/qqmusic-decryptor); the GUI is derived from [strelitzia-reg/qqmusic-decryptor](https://github.com/strelitzia-reg/qqmusic-decryptor). The original repository is also kept as the git remote `upstream`.
 
 **[📖 中文文档](README.zh-CN.md)**
 
