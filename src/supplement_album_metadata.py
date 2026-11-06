@@ -21,39 +21,50 @@
 """
 
 import os
+import re
 import sys
 import requests
 from mutagen.flac import FLAC, Picture
 from mutagen.oggvorbis import OggVorbis
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app_paths import get_logs_dir
 from metadata_utils import extract_track_number_from_filename
+from output_layout import primary_artist
 from abc import ABC, abstractmethod
 from pathlib import Path
 import logging
 
-# 配置日志
-log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+# 配置日志：统一写到程序根目录的 logs/（打包后 = exe 同级 logs/）
+log_dir = get_logs_dir()
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'supplement_album_metadata.log')
 
-# 默认输出到控制台和文件
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-handlers = [
-    logging.FileHandler(log_file, encoding='utf-8'),
-    console_handler
-]
 
-# 如果指定 --quiet，则只输出到文件
-if '--quiet' in sys.argv or '-q' in sys.argv:
+def _configure_logging(force=False):
+    """配置日志；作为模块被 GUI/CLI 导入时不要覆盖调用方的日志配置"""
     handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+    # 如果指定 --quiet，则只输出到文件
+    if '--quiet' not in sys.argv and '-q' not in sys.argv:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        )
+        handlers.append(console_handler)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=handlers,
-    force=True
-)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=handlers,
+        force=force,
+    )
+
+
+# 独立运行时强制接管日志；被 GUI/CLI 导入且已有日志配置时保持调用方的配置
+if __name__ == '__main__':
+    _configure_logging(force=True)
+elif not logging.getLogger().handlers:
+    _configure_logging(force=False)
+
 logger = logging.getLogger(__name__)
 
 # API 配置
@@ -103,6 +114,45 @@ class AudioMetadataExtractor(ABC):
         pass
 
 
+def _tag_text(audio, key):
+    """安全读取标签的第一个文本值"""
+    try:
+        value = audio.get(key)
+    except Exception:
+        return ""
+    if not value:
+        return ""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+        return ""
+    return str(value).strip()
+
+
+def _tag_join(audio, key):
+    """安全读取可能包含多个值的标签，用 / 连接"""
+    try:
+        value = audio.get(key)
+    except Exception:
+        return ""
+    if not value:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "/".join(str(item).strip() for item in value if str(item).strip())
+    return str(value).strip()
+
+
+def _tag_number(audio, key):
+    """安全读取音轨号/碟号"""
+    text = _tag_text(audio, key)
+    if not text:
+        return None
+    match = re.match(r"\s*(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
 class FLACExtractor(AudioMetadataExtractor):
     """FLAC 文件元数据提取器"""
 
@@ -110,9 +160,12 @@ class FLACExtractor(AudioMetadataExtractor):
         """提取 FLAC 文件标签"""
         audio = FLAC(file_path)
         return {
-            "artist": audio["ARTIST"][0],
-            "album": audio["ALBUM"][0],
-            "title": audio["TITLE"][0]
+            "artist": _tag_join(audio, "ARTIST"),
+            "album": _tag_text(audio, "ALBUM"),
+            "title": _tag_text(audio, "TITLE"),
+            "albumartist": _tag_text(audio, "ALBUMARTIST"),
+            "track": _tag_number(audio, "TRACKNUMBER"),
+            "disc": _tag_number(audio, "DISCNUMBER"),
         }
 
     def load_audio(self, file_path: str):
@@ -120,7 +173,11 @@ class FLACExtractor(AudioMetadataExtractor):
         return FLAC(file_path)
 
     def embed_cover(self, audio, cover_data: bytes):
-        """嵌入封面到 FLAC 文件"""
+        """嵌入封面到 FLAC 文件（重复处理时替换旧封面，避免叠加）"""
+        try:
+            audio.clear_pictures()
+        except Exception:
+            pass
         image = Picture()
         image.type = 3
         image.mime = "image/jpeg"
@@ -135,9 +192,12 @@ class OGGExtractor(AudioMetadataExtractor):
         """提取 OGG 文件标签"""
         audio = OggVorbis(file_path)
         return {
-            "artist": audio["ARTIST"][0] or "",
-            "album": audio["ALBUM"][0] or "",
-            "title": audio["TITLE"][0] or ""
+            "artist": _tag_join(audio, "ARTIST"),
+            "album": _tag_text(audio, "ALBUM"),
+            "title": _tag_text(audio, "TITLE"),
+            "albumartist": _tag_text(audio, "ALBUMARTIST"),
+            "track": _tag_number(audio, "TRACKNUMBER"),
+            "disc": _tag_number(audio, "DISCNUMBER"),
         }
 
     def load_audio(self, file_path: str):
@@ -468,37 +528,43 @@ def process_single_file(audio_file_path, pub_year, cover_data, track_number=None
     return metadata_processed
 
 
-def process_directory(dir_path, audio_files, api_cache):
-    """处理单个专辑目录"""
-    # 从第一个文件获取专辑信息
-    first_audio = audio_files[0]
-    tags = extract_audio_tags(first_audio)
-    artist = tags.get("artist")
-    album = tags.get("album")
+def process_album_group(artist, album, audio_files, cover_dir, api_cache, save_cover=True):
+    """
+    处理一组属于同一张专辑的音频文件。
 
-    if not artist or not album:
-        logger.warning(f"缺少必要的标签: {first_audio}")
-        return {"dir_path": dir_path, "status": "skipped", "reason": "缺少标签"}
-
-    logger.info(f"专辑信息: {artist} - {album}")
+    与旧版按物理目录处理的区别：专辑分组可以由调用方按标签决定，
+    因此即使整理后多张专辑放在同一个歌手文件夹里，也不会互相覆盖元数据。
+    """
+    search_artist = primary_artist(artist) or artist
+    logger.info(f"专辑信息: {search_artist} - {album}")
 
     # 获取专辑数据（带缓存）
-    album_metadata = get_album_data(artist, album, api_cache)
+    album_metadata = get_album_data(search_artist, album, api_cache)
     if not album_metadata:
         logger.warning("未获取到专辑信息")
-        return {"dir_path": dir_path, "status": "skipped", "reason": "无专辑信息"}
+        return {
+            "dir_path": cover_dir,
+            "status": "skipped",
+            "reason": "无专辑信息",
+            "file_count": len(audio_files),
+        }
 
     pub_year = album_metadata.get("pub_year", "")
     cover_data = album_metadata.get("cover_data")
 
-    # 处理该专辑目录的所有音频文件
+    # 处理该专辑的所有音频文件
     file_results = []
     for i, audio_file in enumerate(audio_files):
         filename = os.path.basename(audio_file)
         logger.info(f"[INFO] 处理文件 {i+1}/{len(audio_files)}: {filename}")
 
-        # 步骤1：音轨号处理（不依赖 API）
-        track_number = extract_track_number_from_filename(filename)
+        tags = extract_audio_tags(audio_file)
+
+        # 步骤1：音轨号处理（优先用标签，其次用文件名前缀）
+        track_number = tags.get("track")
+        if track_number is None:
+            track_number = extract_track_number_from_filename(filename)
+
         if track_number is not None:
             # 写入音轨号，但不计入统计
             write_track_number(audio_file, track_number)
@@ -526,13 +592,35 @@ def process_directory(dir_path, audio_files, api_cache):
             "metadata_processed": metadata_processed
         })
 
-    # 保存封面到专辑目录
-    if cover_data:
-        cover_path = save_cover_to_directory(dir_path, cover_data)
-        if not cover_path:
-            return {"dir_path": dir_path, "status": "error", "reason": "封面保存失败"}
+    # 保存封面到专辑目录（仅当该目录只属于这一张专辑时）
+    cover_saved = False
+    cover_error = False
+    if cover_data and save_cover and cover_dir:
+        cover_path = save_cover_to_directory(cover_dir, cover_data)
+        cover_saved = bool(cover_path)
+        cover_error = not cover_saved
 
-    return {"dir_path": dir_path, "files": file_results, "album_metadata": album_metadata}
+    return {
+        "dir_path": cover_dir,
+        "files": file_results,
+        "album_metadata": album_metadata,
+        "cover_saved": cover_saved,
+        "cover_error": cover_error,
+    }
+
+
+def process_directory(dir_path, audio_files, api_cache):
+    """处理单个专辑目录（从第一个文件读取专辑标签）"""
+    first_audio = audio_files[0]
+    tags = extract_audio_tags(first_audio)
+    artist = tags.get("artist")
+    album = tags.get("album")
+
+    if not artist or not album:
+        logger.warning(f"缺少必要的标签: {first_audio}")
+        return {"dir_path": dir_path, "status": "skipped", "reason": "缺少标签", "file_count": len(audio_files)}
+
+    return process_album_group(artist, album, audio_files, dir_path, api_cache, save_cover=True)
 
 
 def process_album_directory(album_dir, api_cache=None, options=None):
@@ -608,34 +696,73 @@ def process_album_directory(album_dir, api_cache=None, options=None):
             logger.warning(f"专辑目录中没有音频文件: {dir_path}")
             continue
 
-        # 处理单个目录
-        result = process_directory(dir_path, audio_files, api_cache)
+        # 先读取每个文件的专辑标签，判断这个目录里是一张专辑还是多张专辑。
+        # 旧版保留结构下，一个目录就是一张专辑；整理成「按歌手」或
+        # 「不分文件夹」后，一个目录里可能有多张专辑，必须按标签拆开处理，
+        # 否则所有歌曲都会被写入第一张专辑的年份和封面。
+        tags_by_file = {audio_file: extract_audio_tags(audio_file) for audio_file in audio_files}
+        album_keys = set()
+        for tags in tags_by_file.values():
+            album = tags.get("album")
+            if album:
+                album_keys.add(
+                    (primary_artist(tags.get("albumartist") or tags.get("artist")), album)
+                )
 
-        if result.get("status") == "skipped":
-            file_stats["unchanged"] += len(audio_files)
-            continue
+        def record_result(result, count):
+            """把单次处理结果累加到统计中"""
+            if result.get("status") == "skipped":
+                file_stats["unchanged"] += count
+                return
+            if result.get("status") == "error":
+                file_stats["failed"] += count
+                return
 
-        if result.get("status") == "error":
-            file_stats["failed"] += len(audio_files)
-            continue
+            for file_result in result.get("files", []):
+                if file_result.get("metadata_processed"):
+                    file_stats["processed"] += 1
+                else:
+                    file_stats["unchanged"] += 1
 
-        # 统计处理结果
-        for file_result in result.get("files", []):
-            if file_result.get("metadata_processed"):
-                file_stats["processed"] += 1
-            else:
-                file_stats["unchanged"] += 1
-
-        # 统计封面保存
-        album_metadata = result.get("album_metadata", {})
-        if album_metadata.get("cover_data"):
-            cover_path = save_cover_to_directory(dir_path, album_metadata["cover_data"])
-            if cover_path:
+            if result.get("cover_saved"):
                 operation_stats["cover_saved"]["saved"] += 1
-                logger.info(f"封面已保存到: {cover_path}")
-            else:
+            elif result.get("cover_error"):
                 operation_stats["cover_saved"]["failed"] += 1
-                logger.error(f"封面保存失败")
+                logger.error("封面保存失败")
+
+        # 情况1：目录内只有一张专辑（或没有可用标签）——沿用旧逻辑
+        if len(album_keys) <= 1:
+            result = process_directory(dir_path, audio_files, api_cache)
+            record_result(result, len(audio_files))
+            continue
+
+        # 情况2：目录内有多张专辑——按 (主歌手, 专辑) 分组处理
+        groups = {}
+        ungrouped = []
+        for audio_file in audio_files:
+            tags = tags_by_file[audio_file]
+            album = tags.get("album")
+            if not album:
+                ungrouped.append(audio_file)
+                continue
+            key = (
+                primary_artist(tags.get("albumartist") or tags.get("artist")),
+                album,
+            )
+            groups.setdefault(key, []).append(audio_file)
+
+        if ungrouped:
+            # 没有专辑标签的文件无法可靠补充元数据，保持原样
+            file_stats["unchanged"] += len(ungrouped)
+
+        for (artist, album), group_files in groups.items():
+            if not artist:
+                file_stats["unchanged"] += len(group_files)
+                continue
+            result = process_album_group(
+                artist, album, group_files, dir_path, api_cache, save_cover=False
+            )
+            record_result(result, len(group_files))
 
     # 合并两个统计维度
     combined_stats = {

@@ -1,7 +1,7 @@
 
 # 🎵 QQ Music Decryptor
 
-[![GitHub release](https://img.shields.io/github/v/release/FountainChan/qqmusic-decryptor)](https://github.com/FountainChan/qqmusic-decryptor/releases)
+[![GitHub release](https://img.shields.io/github/v/release/LumiCorn/qqmusic-decryptor)](https://github.com/LumiCorn/qqmusic-decryptor/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![Frida](https://img.shields.io/badge/frida-16.7.10-green)](https://frida.re/)
@@ -37,7 +37,7 @@
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/FountainChan/qqmusic-decryptor.git
+git clone https://github.com/LumiCorn/qqmusic-decryptor.git
 cd qqmusic-decryptor
 
 # 2. Install Python dependencies
@@ -48,6 +48,42 @@ pip install -e .
 ```
 
 After installation, use `qqmusic-decrypt`, `qqmusic-meta`, and `qqmusic-gui` from anywhere. 🎉
+
+---
+
+## 🪟 Prebuilt Windows Executables
+
+The built programs live in `dist/QQMusicDecryptor/`:
+
+| Program | Description |
+|---------|-------------|
+| `QQMusicDecryptor.exe` | 🖥️ GUI version, double-click to launch |
+| `QQMusicDecryptor-Admin.exe` | 🛡️ Visible admin version: requests UAC elevation, shows logs, decrypts using the `config.ini` next to the exe |
+
+Both read **`config.ini` from the program root (the folder containing the exe)**, not the current working directory. Edit `[PATHS]` and restart to apply:
+
+```ini
+[PATHS]
+input_dir = D:\Music\QQMusic\Download
+output_dir = D:\Music\QQMusic\Decrypted
+```
+
+Check which config and directories are actually used (no decryption, no elevation):
+
+```bash
+QQMusicDecryptor-Admin.exe --info
+```
+
+Build them yourself:
+
+```bash
+pip install -r requirements.txt pyinstaller
+python build_exe.py
+```
+
+Output: `dist/QQMusicDecryptor/` and `dist/QQMusicDecryptor-windows-x64.zip`.
+
+> 🐞 Fixed: the CLI and the packaged exe previously ignored the root `config.ini` unless `--config` was passed, falling back to hard-coded `G:\QQMusic\...` paths.
 
 ---
 
@@ -120,12 +156,44 @@ Edit `config.ini` in the project root:
 input_dir = G:\QQMusic\Download\VipSongsDownload
 output_dir = G:\QQMusic\Decrypted
 
+[OUTPUT]
+# album = one folder per album (recommended)
+# artist = one folder per primary artist
+# flat = no folders, everything in output_dir
+folder_mode = album
+
 [OPTIONS]
 max_retries = 3
 preserve_structure = true
 skip_existing = true
 delete_source = true
 ```
+
+### 📂 Output layout
+
+QQ Music downloads are often stored as `Artist/Album`, so an album with many featured artists gets split across several artist folders. `folder_mode` controls how decrypted files are organized:
+
+| Value | Result |
+|-------|--------|
+| `album` | 🎵 One folder per album: merge tracks scattered across artist folders, prefix filenames with track numbers (`01 Title.flac`), rename lyrics to match and fix `[ti]/[ar]/[al]` |
+| `artist` | 🎤 One folder per primary artist, songs sorted by title |
+| `flat` | 📁 No folders: everything in `output_dir`, named `Artist - Title` |
+
+The GUI has an **Output layout** dropdown; the admin executable accepts `--layout`.
+
+### 🧹 Reorganize an existing output folder
+
+If you already decrypted files and the folders are messy, no re-decryption is needed:
+
+```bash
+# Merge by album, move lyrics, remove empty folders
+QQMusicDecryptor-Admin.exe --reorganize --layout album
+
+# Preview only, change nothing
+QQMusicDecryptor-Admin.exe --reorganize --layout album --dry-run
+```
+
+The GUI also has a **整理已有文件** (reorganize existing files) button.
 
 For supplement commands, pass the target directory directly:
 
@@ -200,4 +268,5 @@ The tool is designed for Windows, as it hooks into `QQMusic.exe`. The CLI and me
 
 - [Frida](https://frida.re/) — Dynamic instrumentation toolkit
 - [mutagen](https://mutagen.readthedocs.io/) — Audio metadata handling
+- [FountainChan/qqmusic-decryptor](https://github.com/FountainChan/qqmusic-decryptor) — Upstream project this repository is based on.
 - [strelitzia-reg/qqmusic-decryptor](https://github.com/strelitzia-reg/qqmusic-decryptor) — The original project that inspired this tool. The GUI (`src/gui/`) is modified from this project. Big thanks! 🙌

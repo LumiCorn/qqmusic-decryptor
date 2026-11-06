@@ -26,31 +26,42 @@ import logging
 import sys
 from datetime import datetime
 import shutil
-import configparser
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app_paths import (
+    enable_utf8_console,
+    get_app_root,
+    load_config,
+    resolve_path,
+    resource_path,
+    save_paths_to_config,
+    save_setting_to_config,
+)
 from metadata_utils import (
     extract_track_number_from_filename,
     add_track_number_to_flac,
     process_album_metadata,
     QQMusicAPIClient
 )
+from output_layout import (
+    FOLDER_MODE_CHOICES,
+    build_output_path,
+    folder_mode_label,
+    normalize_folder_mode,
+    read_audio_info,
+    reorganize_output,
+    summary_text,
+)
 
 class QQMusicDecryptorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("QQ音乐解密工具 v1.0")
+        self.root.title("QQ音乐解密工具 v1.1")
         self.root.geometry("800x600")
         self.root.resizable(True, True)
         
         # 新增：配置日志（使用 logging.basicConfig）
-        # 获取项目根目录
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        if script_dir.endswith(('gui_backup', 'gui')):
-            # src/gui/ 下则向上两级到项目根目录
-            project_root = os.path.dirname(os.path.dirname(script_dir))
-        else:
-            # 否则，使用脚本目录
-            project_root = script_dir
+        # 统一使用程序根目录：打包后 = exe 所在目录；开发时 = 项目根目录
+        project_root = get_app_root()
         
         log_dir = os.path.join(project_root, 'logs')
         os.makedirs(log_dir, exist_ok=True)
@@ -162,6 +173,31 @@ class QQMusicDecryptorGUI:
             variable=self.delete_lyrics_var
         ).grid(row=0, column=2, sticky=tk.W, pady=2)
 
+        # 输出整理方式
+        ttk.Label(options_frame, text="输出整理:").grid(row=1, column=0, sticky=tk.W, pady=(8, 2))
+
+        current_label = next(
+            (label for label, value in FOLDER_MODE_CHOICES if value == self.folder_mode),
+            FOLDER_MODE_CHOICES[0][0],
+        )
+        self.folder_mode_var = tk.StringVar(value=current_label)
+        self.folder_mode_combo = ttk.Combobox(
+            options_frame,
+            textvariable=self.folder_mode_var,
+            values=[label for label, _value in FOLDER_MODE_CHOICES],
+            state="readonly",
+            width=30,
+        )
+        self.folder_mode_combo.grid(row=1, column=1, sticky=tk.W, padx=10, pady=(8, 2))
+        self.folder_mode_combo.bind("<<ComboboxSelected>>", self._on_folder_mode_changed)
+
+        ttk.Label(
+            options_frame,
+            text="按专辑：合并同一专辑，按音轨排序，歌词同步改名",
+            font=("Microsoft YaHei UI", 8),
+            foreground="gray",
+        ).grid(row=1, column=2, sticky=tk.W, padx=10, pady=(8, 2))
+
         # 控制按钮框架
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=5, column=0, columnspan=3, pady=20)
@@ -171,6 +207,8 @@ class QQMusicDecryptorGUI:
         
         self.stop_button = ttk.Button(button_frame, text="停止", command=self.stop_decryption, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(button_frame, text="整理已有文件", command=self.reorganize_existing).pack(side=tk.LEFT, padx=5)
         
         ttk.Button(button_frame, text="清空日志", command=self.clear_log).pack(side=tk.LEFT, padx=5)
         
@@ -199,10 +237,19 @@ class QQMusicDecryptorGUI:
         ttk.Label(main_frame, text="工具由 Strelitzia 开发", font=("Arial", 8), foreground="gray").grid(
             row=9, column=2, sticky=tk.E, pady=(10, 0)
         )
+
+        # 配置文件状态（让用户明确看到 exe 实际读取的是哪个 config.ini）
+        config_state = "已加载" if self.config_loaded else "未找到，使用默认值"
+        ttk.Label(
+            main_frame,
+            text=f"配置文件: {self.config_path}  [{config_state}]",
+            font=("Microsoft YaHei UI", 8),
+            foreground="gray",
+        ).grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
         
         # 配置网格权重
         main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(8, weight=1)
+        main_frame.rowconfigure(10, weight=1)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         
@@ -255,65 +302,37 @@ class QQMusicDecryptorGUI:
         """
         加载配置文件
 
-        从 config.ini 读取：
+        从程序根目录的 config.ini 读取：
         1. 路径配置作为默认值（用于 GUI 默认路径）
         2. 删除选项配置作为默认值
+
+        打包后程序根目录 = exe 所在目录，因此 exe 同级的 config.ini 会生效。
         """
-        self.config = configparser.ConfigParser()
+        self.config, self.config_path, self.config_loaded = load_config()
+        cfg = self.config
 
-        # 默认值（从 config.ini 的 PATHS 部分）
-        default_input_dir = "G:\\QQMusic\\Download\\VipSongsDownload"
-        default_output_dir = "G:\\QQMusic\\Decrypted\\VipSongsDownload"
+        # 默认值从 config.ini 的 PATHS / OPTIONS 段读取
+        default_input_dir = resolve_path(cfg.get('PATHS', 'input_dir', fallback=''), get_app_root())
+        default_output_dir = resolve_path(cfg.get('PATHS', 'output_dir', fallback=''), get_app_root())
 
-        # 默认删除配置
-        default_delete_source = True
-        default_delete_empty_dirs = True
-        default_delete_lyrics = True
+        default_delete_source = cfg.getboolean('OPTIONS', 'delete_source', fallback=True)
+        default_delete_empty_dirs = cfg.getboolean('OPTIONS', 'delete_empty_dirs', fallback=True)
+        default_delete_lyrics = cfg.getboolean('OPTIONS', 'delete_lyrics', fallback=True)
 
-        # 默认元数据处理模式配置
-        default_metadata_processing_mode = 'batch'
-        default_skip_metadata_during_decrypt = True
-
-        # 读取配置文件
-        config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "config.ini"
+        default_metadata_processing_mode = cfg.get('OPTIONS', 'metadata_processing_mode', fallback='batch')
+        default_skip_metadata_during_decrypt = cfg.getboolean(
+            'OPTIONS', 'skip_metadata_during_decrypt', fallback=True
         )
 
-        if os.path.exists(config_path):
-            try:
-                self.config.read(config_path, encoding='utf-8')
+        # 输出整理方式：album / artist / flat
+        default_folder_mode = normalize_folder_mode(
+            cfg.get('OUTPUT', 'folder_mode', fallback='album')
+        )
 
-                # 读取路径配置
-                if 'PATHS' in self.config:
-                    default_input_dir = self.config['PATHS'].get('input_dir', default_input_dir)
-                    default_output_dir = self.config['PATHS'].get('output_dir', default_output_dir)
-
-                # 读取删除配置
-                if 'OPTIONS' in self.config:
-                    default_delete_source = self.config['OPTIONS'].getboolean(
-                        'delete_source', fallback=True
-                    )
-                    default_delete_empty_dirs = self.config['OPTIONS'].getboolean(
-                        'delete_empty_dirs', fallback=True
-                    )
-                    default_delete_lyrics = self.config['OPTIONS'].getboolean(
-                        'delete_lyrics', fallback=True
-                    )
-
-                    # 读取元数据处理模式配置
-                    default_metadata_processing_mode = self.config['OPTIONS'].get(
-                        'metadata_processing_mode', fallback='batch'
-                    )
-                    default_skip_metadata_during_decrypt = self.config['OPTIONS'].getboolean(
-                        'skip_metadata_during_decrypt', fallback=True
-                    )
-
-                print(f"[配置] 已加载配置文件: {config_path}")
-            except Exception as e:
-                print(f"[配置] 读取配置文件失败: {e}，使用默认配置")
+        if self.config_loaded:
+            print(f"[配置] 已加载配置文件: {self.config_path}")
         else:
-            print(f"[配置] 配置文件不存在: {config_path}，使用默认配置")
+            print(f"[配置] 配置文件不存在: {self.config_path}，使用默认配置")
 
         # 保存为实例变量，供后续使用
         self.default_input_dir = default_input_dir
@@ -323,17 +342,38 @@ class QQMusicDecryptorGUI:
         self.default_delete_lyrics = default_delete_lyrics
         self.metadata_processing_mode = default_metadata_processing_mode
         self.skip_metadata_during_decrypt = default_skip_metadata_during_decrypt
-    
-    def _save_paths_to_config(self):
+        self.folder_mode = default_folder_mode
+
+    def get_folder_mode(self):
+        """从下拉框读取整理方式（返回 album / artist / flat）"""
+        label = self.folder_mode_var.get()
+        for choice_label, choice_value in FOLDER_MODE_CHOICES:
+            if choice_label == label:
+                return choice_value
+        return normalize_folder_mode(label)
+
+    def _on_folder_mode_changed(self, _event=None):
+        """用户切换整理方式后立即保存到 config.ini（仅打包后的 exe）"""
+        self.folder_mode = self.get_folder_mode()
         if not getattr(sys, 'frozen', False):
             return
         try:
-            self.config['PATHS']['input_dir'] = self.input_path.get()
-            self.config['PATHS']['output_dir'] = self.output_path.get()
-            with open('config.ini', 'w', encoding='utf-8') as f:
-                self.config.write(f)
-        except Exception:
-            pass
+            save_setting_to_config(
+                self.config_path, 'OUTPUT', 'folder_mode', self.folder_mode
+            )
+            logging.info(f"已保存整理方式: {folder_mode_label(self.folder_mode)}")
+        except Exception as e:
+            logging.warning(f"保存整理方式失败: {e}")
+
+    def _save_paths_to_config(self):
+        """把用户选择的路径写回 exe 同级的 config.ini（仅打包后的 exe 自动保存）"""
+        if not getattr(sys, 'frozen', False):
+            return
+        try:
+            save_paths_to_config(self.config_path, self.input_path.get(), self.output_path.get())
+            logging.info(f"已保存路径到配置文件: {self.config_path}")
+        except Exception as e:
+            logging.warning(f"保存路径到配置文件失败: {e}")
 
     def browse_input(self):
         path = filedialog.askdirectory(title="选择加密文件目录")
@@ -368,6 +408,14 @@ class QQMusicDecryptorGUI:
         if not os.path.exists(self.input_path.get()):
             messagebox.showerror("错误", "输入目录不存在")
             return
+
+        # 读取本次选择的整理方式
+        self.folder_mode = self.get_folder_mode()
+        if getattr(sys, 'frozen', False):
+            try:
+                save_setting_to_config(self.config_path, 'OUTPUT', 'folder_mode', self.folder_mode)
+            except Exception:
+                pass
         
         # 创建输出目录
         os.makedirs(self.output_path.get(), exist_ok=True)
@@ -399,6 +447,59 @@ class QQMusicDecryptorGUI:
                 self.session.detach()
             except:
                 pass
+
+    def reorganize_existing(self):
+        """按当前整理方式整理已有输出目录（不需要重新解密）"""
+        if self.is_processing:
+            messagebox.showwarning("请稍候", "当前正在处理文件，请等待完成后再整理。")
+            return
+
+        output_dir = self.output_path.get().strip()
+        if not output_dir or not os.path.isdir(output_dir):
+            messagebox.showerror("错误", "输出目录不存在")
+            return
+
+        mode = self.get_folder_mode()
+        label = folder_mode_label(mode)
+        if not messagebox.askyesno(
+            "整理已有文件",
+            f"将按「{label}」整理以下目录：\n{output_dir}\n\n"
+            "会移动音频和歌词、合并重复的专辑文件夹，并清理空目录。\n"
+            "是否继续？",
+        ):
+            return
+
+        self.folder_mode = mode
+        self.is_processing = True
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.DISABLED)
+        self.update_status(f"正在整理：{label}")
+        self.log("=" * 50)
+        self.log(f"开始整理已有输出目录: {output_dir}")
+        self.log(f"整理方式: {label}")
+
+        def worker():
+            try:
+                stats = reorganize_output(output_dir, mode, logger=self.log)
+                self.log(summary_text(stats))
+                self.log("整理完成")
+                self.root.after(0, lambda: messagebox.showinfo("整理完成", summary_text(stats)))
+            except Exception as e:
+                self.log(f"整理失败: {e}", logging.ERROR)
+                error_text = str(e)
+                self.root.after(0, lambda: messagebox.showerror("整理失败", error_text))
+            finally:
+                def restore_ui():
+                    self.is_processing = False
+                    self.start_button.config(state=tk.NORMAL)
+                    self.stop_button.config(state=tk.DISABLED)
+                    self.update_status("整理完成")
+
+                self.root.after(0, restore_ui)
+
+        thread = threading.Thread(target=worker)
+        thread.daemon = True
+        thread.start()
 
     def copy_lyrics_file(self, input_file, output_file):
         """
@@ -568,13 +669,9 @@ class QQMusicDecryptorGUI:
                 self.stop_decryption()
                 return
             
-            # 加载解密脚本
+            # 加载解密脚本（兼容源码运行与 PyInstaller 打包）
             try:
-                if getattr(sys, 'frozen', False):
-                    base = sys._MEIPASS
-                else:
-                    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                hook_path = os.path.join(base, "hook_qq_music.js")
+                hook_path = resource_path("hook_qq_music.js")
                 with open(hook_path, "r", encoding="utf-8") as f:
                     script_code = f.read()
                 self.script = self.session.create_script(script_code)
@@ -658,6 +755,25 @@ class QQMusicDecryptorGUI:
                     result = self.script.exports_sync.decrypt(encrypted_file, temp_file_path)
                     
                     if "Success" in result:
+                        # 新布局下，输出目录里可能已经有这首歌，避免重复生成副本
+                        if self.folder_mode != 'mirror':
+                            try:
+                                layout_target = build_output_path(
+                                    output_dir,
+                                    read_audio_info(temp_file_path),
+                                    self.folder_mode,
+                                    temp_file_path,
+                                )
+                                if os.path.exists(layout_target) and not os.path.samefile(
+                                    temp_file_path, layout_target
+                                ):
+                                    os.remove(temp_file_path)
+                                    skipped_files += 1
+                                    self.log(f"目标已存在，跳过: {os.path.basename(layout_target)}")
+                                    continue
+                            except Exception as e:
+                                self.log(f"检查整理目标失败: {e}", logging.WARNING)
+
                         # 重命名临时文件
                         os.rename(temp_file_path, output_file_path)
                         success_files += 1
@@ -712,6 +828,7 @@ class QQMusicDecryptorGUI:
                 self.log(f"已删除文件: {self.deleted_files}")
                 self.log(f"已删除目录: {self.deleted_dirs}")
                 self.log(f"输出目录: {output_dir}")
+                self.log(f"输出整理: {folder_mode_label(self.folder_mode)}")
 
                 # 解密完成后统一处理元数据（批量模式）
                 if self.metadata_processing_mode == 'batch':
@@ -726,6 +843,20 @@ class QQMusicDecryptorGUI:
                     self.log("=" * 50)
                     self.log("元数据处理完成")
                     self.log("=" * 50)
+
+                # 按用户选择的方式整理输出目录
+                if self.folder_mode != 'mirror':
+                    self.log("=" * 50)
+                    self.log(f"开始整理输出目录（{folder_mode_label(self.folder_mode)}）")
+                    self.log("=" * 50)
+                    self.update_status("正在整理输出目录...")
+                    try:
+                        layout_stats = reorganize_output(
+                            output_dir, self.folder_mode, logger=self.log
+                        )
+                        self.log(summary_text(layout_stats))
+                    except Exception as e:
+                        self.log(f"整理输出目录失败: {e}", logging.ERROR)
 
                 self.update_status("解密完成")
 
@@ -761,6 +892,7 @@ class QQMusicDecryptorGUI:
             self.stop_button.config(state=tk.DISABLED)
 
 if __name__ == "__main__":
+    enable_utf8_console()
     # 检查frida是否可用
     try:
         import frida

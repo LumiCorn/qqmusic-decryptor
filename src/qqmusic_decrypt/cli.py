@@ -24,18 +24,23 @@ import os
 import sys
 import argparse
 
-# ── 检测项目根目录 ──────────────────────────────────────────
-# 当前文件: .../project_root/src/qqmusic_decrypt/cli.py
-# 向上两级 = project_root
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ── 检测程序根目录 ──────────────────────────────────────────
+# 当前文件: .../src/qqmusic_decrypt/cli.py
+# 向上三级 = 项目根目录；打包后由 app_paths 统一返回 exe 所在目录
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from app_paths import get_app_root, load_config, resolve_path
+
+_PROJECT_ROOT = get_app_root()
 
 
 def _to_root():
-    """切换到项目根目录并添加 src/ 到 Python 路径"""
+    """切换到程序根目录并添加 src/ 到 Python 路径"""
     os.chdir(_PROJECT_ROOT)
-    src_dir = os.path.join(_PROJECT_ROOT, 'src')
-    if src_dir not in sys.path:
-        sys.path.insert(0, src_dir)
+    if _SRC_DIR not in sys.path:
+        sys.path.insert(0, _SRC_DIR)
 
 
 def _run_decrypt(verbose, remaining_argv):
@@ -115,13 +120,15 @@ def main():
 
     args, remaining = parser.parse_known_args()
 
-    # ── 读取配置 ──
-    import configparser
-    config = configparser.ConfigParser()
-    config.read('config.ini', encoding='utf-8')
+    # ── 读取配置（程序根目录 / exe 同级 config.ini）──
+    config, config_path, config_loaded = load_config()
 
-    input_dir = config.get('PATHS', 'input_dir', fallback=None)
-    output_dir = args.output or config.get('PATHS', 'output_dir', fallback='G:/QQMusic/Decrypted')
+    input_dir = resolve_path(config.get('PATHS', 'input_dir', fallback=''), _PROJECT_ROOT)
+    output_dir = args.output or resolve_path(
+        config.get('PATHS', 'output_dir', fallback='G:/QQMusic/Decrypted'), _PROJECT_ROOT
+    )
+
+    print(f"配置文件: {config_path} ({'已加载' if config_loaded else '未找到，使用默认值'})")
 
     if not input_dir and not args.skip_decrypt:
         print('[错误] 未配置输入目录，请在 config.ini 中设置 [PATHS] input_dir')
@@ -202,10 +209,11 @@ def supplement_main():
     if args.album_dir:
         album_dir = args.album_dir
     else:
-        import configparser
-        config = configparser.ConfigParser()
-        config.read('config.ini', encoding='utf-8')
-        album_dir = config.get('PATHS', 'output_dir', fallback='G:/QQMusic/Decrypted')
+        config, config_path, _ = load_config()
+        album_dir = resolve_path(
+            config.get('PATHS', 'output_dir', fallback='G:/QQMusic/Decrypted'), _PROJECT_ROOT
+        )
+        print(f'使用配置文件: {config_path}')
         print(f'使用默认目录: {album_dir}')
 
     return _process_directory(album_dir, args.verbose)

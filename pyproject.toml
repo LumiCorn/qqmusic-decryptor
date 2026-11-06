@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qqmusic-decrypt"
-version = "1.0.0"
+version = "1.2.0"
 description = "QQ音乐加密文件批量解密工具 - 基于Frida动态插桩"
 license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.8"
@@ -21,6 +21,10 @@ qqmusic-gui = "qqmusic_decrypt.cli:gui_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# app_paths.py / output_layout.py 是 qqmusic_decrypt.cli 依赖的共享模块
+[tool.setuptools]
+py-modules = ["app_paths", "output_layout"]
 
 [tool.ruff]
 # 允许现有代码中的模式，逐步收紧

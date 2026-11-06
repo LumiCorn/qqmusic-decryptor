@@ -29,22 +29,38 @@ import json
 import time
 from datetime import datetime
 import shutil
-from pathlib import Path
-import configparser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app_paths import (
+    enable_utf8_console,
+    get_app_root,
+    get_log_path,
+    load_config,
+    resolve_path,
+    resource_path,
+)
 from metadata_utils import (
     extract_track_number_from_filename,
     add_track_number_to_flac,
     process_album_metadata,
     QQMusicAPIClient
 )
+from output_layout import (
+    build_output_path,
+    folder_mode_label,
+    normalize_folder_mode,
+    read_audio_info,
+    reorganize_output,
+    summary_text,
+)
 
 
 class QQMusicDecryptorCLI:
     def __init__(self, config_path=None):
         """初始化配置"""
-        self.config = self._load_config(config_path)
-        
+        # config_path 为 None 时也主动查找程序根目录下的 config.ini
+        # （修复：以前不传 --config 就完全不读取 config.ini）
+        self.config, self.config_path, self.config_loaded = load_config(config_path)
+
         # 从配置或命令行参数获取路径
         self.input_dir = None
         self.output_dir = None
@@ -58,6 +74,11 @@ class QQMusicDecryptorCLI:
         # 从配置读取元数据处理模式
         self.metadata_processing_mode = self.config.get('OPTIONS', 'metadata_processing_mode', fallback='batch')
         self.skip_metadata_during_decrypt = self.config.getboolean('OPTIONS', 'skip_metadata_during_decrypt', fallback=True)
+
+        # 解密后的输出整理方式：album / artist / flat
+        self.folder_mode = normalize_folder_mode(
+            self.config.get('OUTPUT', 'folder_mode', fallback='album')
+        )
 
         # 新增：删除选项
         self.delete_source = True
@@ -83,43 +104,14 @@ class QQMusicDecryptorCLI:
         
         # 日志
         self.log_file = None
+        self.log_file_path = None
         self.log_messages = []
-        
+
     def _load_config(self, config_path):
-        """加载配置文件"""
-        config = configparser.ConfigParser()
-        
-        # 默认配置
-        config['PATHS'] = {
-            'input_dir': 'G:\\QQMusic\\Download',
-            'output_dir': 'G:\\QQMusic\\Decrypted'
-        }
-        config['LOGGING'] = {
-            'log_level': 'INFO',
-            'log_file': 'logs/decrypt.log',
-            'save_stats': 'true'
-        }
-        config['OPTIONS'] = {
-            'preserve_structure': 'true',
-            'skip_existing': 'true',
-            'max_retries': '3',
-            'retry_delay': '2',
-            'verify_metadata': 'true',
-            'delete_source': 'true',
-            'delete_empty_dirs': 'true',
-            'delete_lyrics': 'true',
-            'metadata_processing_mode': 'batch',
-            'skip_metadata_during_decrypt': 'true'
-        }
-        config['NOTIFICATIONS'] = {
-            'show_completion': 'true',
-            'show_summary': 'true'
-        }
-        
-        # 加载配置文件（如果存在）
-        if config_path and os.path.exists(config_path):
-            config.read(config_path, encoding='utf-8')
-        
+        """加载配置文件（保留此方法以兼容旧调用）"""
+        config, path, loaded = load_config(config_path)
+        self.config_path = path
+        self.config_loaded = loaded
         return config
     
     def log(self, message, level='INFO'):
@@ -192,7 +184,8 @@ class QQMusicDecryptorCLI:
     
     def load_decrypt_script(self):
         """加载Frida解密脚本"""
-        script_path = os.path.join(os.path.dirname(__file__), "hook_qq_music.js")
+        # 打包后 hook_qq_music.js 位于 PyInstaller 资源目录，而不是 __file__ 同级
+        script_path = resource_path("hook_qq_music.js")
         
         if not os.path.exists(script_path):
             self.log(f"未找到解密脚本: {script_path}", "ERROR")
@@ -414,48 +407,23 @@ class QQMusicDecryptorCLI:
 
     def run_supplement_metadata(self):
         """
-        运行元数据补充脚本
+        运行元数据补充
 
         处理整个输出目录，批量添加音轨号、封面、年份
+
+        注意：直接在当前进程内调用，不再通过 ``python script.py`` 子进程，
+        这样 PyInstaller 打包后的 exe 里没有 python 解释器也能正常工作。
         """
-        import subprocess
-
         try:
-            # 检查 supplement_album_metadata.py 是否存在
-            script_path = os.path.join(os.path.dirname(__file__), 'supplement_album_metadata.py')
+            from supplement_album_metadata import process_album_directory
 
-            if not os.path.exists(script_path):
-                self.log(f"元数据脚本不存在: {script_path}", "WARNING")
+            if not os.path.isdir(self.output_dir):
+                self.log(f"输出目录不存在，跳过元数据补充: {self.output_dir}", "WARNING")
                 return
 
-            # 构建命令
-            cmd = ['python', script_path, self.output_dir]
-
-            self.log(f"执行命令: {' '.join(cmd)}", "INFO")
-
-            # 运行脚本
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8'
-            )
-
-            # 输出脚本输出（只输出 info 级别）
-            for line in result.stdout.split('\n'):
-                if line.strip() and ('INFO' in line or '处理' in line):
-                    self.log(line.strip(), "INFO")
-
-            # 输出错误信息
-            if result.stderr:
-                for line in result.stderr.split('\n'):
-                    if line.strip():
-                        self.log(line.strip(), "ERROR")
-
-            if result.returncode == 0:
-                self.log("元数据处理成功", "INFO")
-            else:
-                self.log(f"元数据处理失败，错误代码: {result.returncode}", "ERROR")
+            self.log(f"正在补充专辑元数据: {self.output_dir}", "INFO")
+            process_album_directory(self.output_dir)
+            self.log("元数据处理完成", "INFO")
 
         except Exception as e:
             self.log(f"执行元数据脚本异常: {e}", "ERROR")
@@ -507,6 +475,28 @@ class QQMusicDecryptorCLI:
                 result = "AttributeError: " + str(e)
             
             if "Success" in result:
+                # 新布局下，输出目录里可能已经有这首歌（之前解密并整理过）。
+                # 在移动前按目标路径检查，避免重复生成 "(2)" 副本。
+                if self.skip_existing and self.folder_mode != 'mirror':
+                    try:
+                        layout_target = build_output_path(
+                            self.output_dir,
+                            read_audio_info(temp_file_path),
+                            self.folder_mode,
+                            temp_file_path,
+                        )
+                        if os.path.exists(layout_target) and not os.path.samefile(
+                            temp_file_path, layout_target
+                        ):
+                            os.remove(temp_file_path)
+                            self.log(
+                                f"目标已存在，跳过: {os.path.basename(layout_target)}",
+                                "INFO",
+                            )
+                            return "skipped"
+                    except Exception as e:
+                        self.log(f"检查整理目标失败: {e}", "WARNING")
+
                 # 重命名为最终文件名
                 os.rename(temp_file_path, output_file)
                 
@@ -660,6 +650,23 @@ class QQMusicDecryptorCLI:
             self.log("元数据处理完成", "INFO")
             self.log("=" * 60, "INFO")
 
+        # 解密与元数据完成后，按用户选择的方式整理输出目录
+        if self.folder_mode != 'mirror':
+            self.log("=" * 60, "INFO")
+            self.log(f"开始整理输出目录（{folder_mode_label(self.folder_mode)}）", "INFO")
+            self.log("=" * 60, "INFO")
+            try:
+                layout_stats = reorganize_output(
+                    self.output_dir,
+                    self.folder_mode,
+                    logger=lambda message: self.log(message, "INFO"),
+                )
+                self.log(summary_text(layout_stats), "INFO")
+                self.stats['layout'] = layout_stats
+            except Exception as e:
+                self.log(f"整理输出目录失败: {e}", "ERROR")
+                self.stats['layout_error'] = str(e)
+
         # 打印完成通知
         self.print_completion_notice()
 
@@ -683,6 +690,12 @@ class QQMusicDecryptorCLI:
         print(f"  跳过: {self.stats['skipped']} [SKIP]")
         print(f"  处理时间: {int(duration_min)}分{int(duration_sec)}秒")
         print(f"  平均速度: {self.stats['speed']:.2f} 文件/分钟")
+        print(f"  输出整理: {folder_mode_label(self.folder_mode)}")
+        if self.stats.get('layout'):
+            layout = self.stats['layout']
+            print(f"  整理结果: 移动 {layout.get('moved', 0)}，"
+                  f"歌词 {layout.get('lyrics', 0)}，"
+                  f"清理空目录 {layout.get('dirs_removed', 0)}")
         print("="*60)
 
         if self.stats['failed'] > 0:
@@ -697,12 +710,15 @@ class QQMusicDecryptorCLI:
     def save_stats(self):
         """保存统计信息到JSON文件"""
         if self.config.getboolean('LOGGING', 'save_stats', fallback=True):
-            stats_file = os.path.join(os.path.dirname(self.log_file.name), 'stats.json')
+            log_dir = os.path.dirname(self.log_file_path) if self.log_file_path else os.path.join(get_app_root(), 'logs')
+            stats_file = os.path.join(log_dir, 'stats.json')
+            os.makedirs(log_dir, exist_ok=True)
             
             stats_data = {
                 'timestamp': datetime.now().isoformat(),
                 'input_dir': self.input_dir,
                 'output_dir': self.output_dir,
+                'folder_mode': self.folder_mode,
                 'stats': self.stats,
                 'cleanup': {
                     'deleted_files': self.deleted_files,
@@ -727,8 +743,9 @@ class QQMusicDecryptorCLI:
                 pass
     
     def setup_logging(self):
-        """设置日志文件"""
-        log_file_path = self.config['LOGGING']['log_file']
+        """设置日志文件（相对路径相对于程序根目录，而不是当前工作目录）"""
+        log_file_path = get_log_path(self.config)
+        self.log_file_path = log_file_path
         
         # 确保日志目录存在
         log_dir = os.path.dirname(log_file_path)
@@ -743,7 +760,77 @@ class QQMusicDecryptorCLI:
             print(f"警告: 无法打开日志文件: {e}")
 
 
+def apply_config_to_decryptor(decryptor, input_dir=None, output_dir=None, verbose=False,
+                              retries=None, no_skip=False, flat=False):
+    """
+    把 config.ini 与命令行参数应用到解密器。
+
+    配置中的相对路径相对于程序根目录解析；命令行显式传入的相对路径
+    相对于当前工作目录解析。
+    """
+    config = decryptor.config
+
+    input_value = input_dir if input_dir else config.get('PATHS', 'input_dir', fallback='')
+    output_value = output_dir if output_dir else config.get('PATHS', 'output_dir', fallback='')
+    decryptor.input_dir = resolve_path(input_value, os.getcwd() if input_dir else get_app_root())
+    decryptor.output_dir = resolve_path(output_value, os.getcwd() if output_dir else get_app_root())
+
+    decryptor.verbose = verbose
+    decryptor.max_retries = retries if retries is not None else config.getint('OPTIONS', 'max_retries', fallback=3)
+    decryptor.retry_delay = config.getint('OPTIONS', 'retry_delay', fallback=2)
+    decryptor.preserve_structure = (
+        not flat and config.getboolean('OPTIONS', 'preserve_structure', fallback=True)
+    )
+    decryptor.skip_existing = (
+        not no_skip and config.getboolean('OPTIONS', 'skip_existing', fallback=True)
+    )
+    decryptor.verify_metadata = config.getboolean('OPTIONS', 'verify_metadata', fallback=True)
+    decryptor.delete_source = config.getboolean('OPTIONS', 'delete_source', fallback=True)
+    decryptor.delete_empty_dirs = config.getboolean('OPTIONS', 'delete_empty_dirs', fallback=True)
+    decryptor.delete_lyrics = config.getboolean('OPTIONS', 'delete_lyrics', fallback=True)
+    decryptor.metadata_processing_mode = config.get('OPTIONS', 'metadata_processing_mode', fallback='batch')
+    decryptor.skip_metadata_during_decrypt = config.getboolean(
+        'OPTIONS', 'skip_metadata_during_decrypt', fallback=True
+    )
+    decryptor.folder_mode = normalize_folder_mode(
+        config.get('OUTPUT', 'folder_mode', fallback='album')
+    )
+
+    return decryptor
+
+
+def print_config_info(decryptor):
+    """打印最终解析到的配置与目录（用于 --info 自检）"""
+    import ctypes
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        is_admin = False
+
+    hook_path = resource_path("hook_qq_music.js")
+    log_path = decryptor.log_file_path or get_log_path(decryptor.config)
+
+    print("=" * 60)
+    print("  QQ音乐解密工具 - 配置解析结果")
+    print("=" * 60)
+    print(f"  程序根目录 : {get_app_root()}")
+    print(f"  配置文件   : {decryptor.config_path}")
+    print(f"  配置状态   : {'已加载' if decryptor.config_loaded else '未找到（使用内置默认值）'}")
+    print(f"  输入目录   : {decryptor.input_dir}")
+    print(f"  输入状态   : {'存在' if os.path.isdir(decryptor.input_dir) else '不存在'}")
+    print(f"  输出目录   : {decryptor.output_dir}")
+    print(f"  日志文件   : {log_path}")
+    print(f"  解密脚本   : {hook_path}  ({'存在' if os.path.isfile(hook_path) else '缺失'})")
+    print(f"  管理员权限 : {'是' if is_admin else '否'}")
+    print(f"  整理方式   : {folder_mode_label(decryptor.folder_mode)} ({decryptor.folder_mode})")
+    print(f"  保留结构   : {decryptor.preserve_structure}")
+    print(f"  跳过已存在 : {decryptor.skip_existing}")
+    print(f"  最大重试   : {decryptor.max_retries}")
+    print("=" * 60)
+
+
 def main():
+    enable_utf8_console()
     parser = argparse.ArgumentParser(
         description='QQ音乐批量解密工具 - 命令行版本',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -753,43 +840,99 @@ def main():
   python main_cli.py --input "D:\\Music\\VipSongs" --output "D:\\Music\\Decrypted"
   python main_cli.py -i "D:\\input" -o "D:\\output" --verbose
   python main_cli.py --config "config.ini" --retries 5
+  python main_cli.py --info
         """
     )
     
     parser.add_argument('-i', '--input', help='输入目录（包含.mflac/.mgg文件）')
     parser.add_argument('-o', '--output', help='输出目录（保存解密后的文件）')
     parser.add_argument('-v', '--verbose', action='store_true', help='显示详细日志')
-    parser.add_argument('-c', '--config', help='配置文件路径')
+    parser.add_argument('-c', '--config', help='配置文件路径（默认: 程序根目录/config.ini）')
     parser.add_argument('-r', '--retries', type=int, help='重试次数（默认: 3）')
     parser.add_argument('--no-skip', action='store_true', help='不跳过已存在的文件')
-    parser.add_argument('--flat', action='store_true', help='不保留目录结构（扁平化输出）')
+    parser.add_argument('--flat', action='store_true', help='不保留目录结构（等价于 --layout flat）')
+    parser.add_argument(
+        '--layout',
+        choices=['album', 'artist', 'flat'],
+        help='解密后整理方式：album=按专辑（默认），artist=按歌手，flat=不分文件夹',
+    )
+    parser.add_argument('--reorganize', action='store_true', help='只整理已有输出目录，不执行解密')
+    parser.add_argument('--dry-run', action='store_true', help='配合 --reorganize，仅预览整理结果')
+    parser.add_argument('--info', action='store_true', help='仅显示解析后的配置和目录，不执行解密')
     
     args = parser.parse_args()
     
-    # 创建解密器实例
+    # 创建解密器实例：不传 --config 时也会读取程序根目录的 config.ini
     decryptor = QQMusicDecryptorCLI(config_path=args.config)
-    
+
+    # 应用配置（含路径规范化）
+    apply_config_to_decryptor(
+        decryptor,
+        input_dir=args.input,
+        output_dir=args.output,
+        verbose=args.verbose,
+        retries=args.retries,
+        no_skip=args.no_skip,
+        flat=args.flat,
+    )
+
+    # 命令行 --layout 优先于 config.ini；旧的 --flat 等价于 --layout flat
+    if args.layout:
+        decryptor.folder_mode = normalize_folder_mode(args.layout)
+    elif args.flat:
+        decryptor.folder_mode = 'flat'
+
+    # --info：只显示配置，不连接 QQ 音乐
+    if args.info:
+        print_config_info(decryptor)
+        return 0
+
+    # --reorganize：只整理已有输出目录，不需要连接 QQ 音乐
+    if args.reorganize:
+        decryptor.setup_logging()
+        decryptor.log("=" * 60, "INFO")
+        decryptor.log("QQ Music 解密工具 - 整理已有输出目录", "INFO")
+        decryptor.log("=" * 60, "INFO")
+        decryptor.log(f"输出目录: {decryptor.output_dir}", "INFO")
+        decryptor.log(f"整理方式: {folder_mode_label(decryptor.folder_mode)}", "INFO")
+
+        if not os.path.isdir(decryptor.output_dir):
+            decryptor.log(f"输出目录不存在: {decryptor.output_dir}", "ERROR")
+            if decryptor.log_file:
+                decryptor.log_file.close()
+            return 1
+
+        try:
+            stats = reorganize_output(
+                decryptor.output_dir,
+                decryptor.folder_mode,
+                logger=lambda message: decryptor.log(message, "INFO"),
+                dry_run=args.dry_run,
+            )
+            decryptor.log(summary_text(stats), "INFO")
+            exit_code = 0 if stats.get("failed", 0) == 0 else 1
+        except Exception as e:
+            decryptor.log(f"整理输出目录失败: {e}", "ERROR")
+            exit_code = 1
+        finally:
+            if decryptor.log_file:
+                decryptor.log_file.close()
+        return exit_code
+
+    if args.dry_run:
+        print("提示: --dry-run 只能和 --reorganize 一起使用。")
+
     # 设置日志
     decryptor.setup_logging()
-    
-    # 从配置或命令行参数获取设置
-    decryptor.input_dir = args.input or decryptor.config['PATHS']['input_dir']
-    decryptor.output_dir = args.output or decryptor.config['PATHS']['output_dir']
-    decryptor.verbose = args.verbose
-    decryptor.max_retries = args.retries or decryptor.config.getint('OPTIONS', 'max_retries')
-    decryptor.retry_delay = decryptor.config.getint('OPTIONS', 'retry_delay')
-    decryptor.preserve_structure = not args.flat and decryptor.config.getboolean('OPTIONS', 'preserve_structure')
-    decryptor.skip_existing = not args.no_skip and decryptor.config.getboolean('OPTIONS', 'skip_existing')
-    decryptor.verify_metadata = decryptor.config.getboolean('OPTIONS', 'verify_metadata')
-    decryptor.delete_source = decryptor.config.getboolean('OPTIONS', 'delete_source', fallback=True)
-    decryptor.delete_empty_dirs = decryptor.config.getboolean('OPTIONS', 'delete_empty_dirs', fallback=True)
-    decryptor.delete_lyrics = decryptor.config.getboolean('OPTIONS', 'delete_lyrics', fallback=True)
     
     decryptor.log("="*60, "INFO")
     decryptor.log("QQ Music 批量解密工具 - CLI版本", "INFO")
     decryptor.log("="*60, "INFO")
+    decryptor.log(f"配置文件: {decryptor.config_path} "
+                  f"({'已加载' if decryptor.config_loaded else '未找到，使用默认值'})", "INFO")
     decryptor.log(f"输入目录: {decryptor.input_dir}", "INFO")
     decryptor.log(f"输出目录: {decryptor.output_dir}", "INFO")
+    decryptor.log(f"输出整理方式: {folder_mode_label(decryptor.folder_mode)}", "INFO")
     decryptor.log(f"保留目录结构: {decryptor.preserve_structure}", "INFO")
     decryptor.log(f"跳过已存在: {decryptor.skip_existing}", "INFO")
     decryptor.log(f"最大重试次数: {decryptor.max_retries}", "INFO")

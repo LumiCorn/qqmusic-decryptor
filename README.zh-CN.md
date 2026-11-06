@@ -1,7 +1,7 @@
 
 # 🎵 QQ Music 解密工具
 
-[![GitHub release](https://img.shields.io/github/v/release/FountainChan/qqmusic-decryptor)](https://github.com/FountainChan/qqmusic-decryptor/releases)
+[![GitHub release](https://img.shields.io/github/v/release/LumiCorn/qqmusic-decryptor)](https://github.com/LumiCorn/qqmusic-decryptor/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![Frida](https://img.shields.io/badge/frida-16.7.10-green)](https://frida.re/)
@@ -37,7 +37,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/FountainChan/qqmusic-decryptor.git
+git clone https://github.com/LumiCorn/qqmusic-decryptor.git
 cd qqmusic-decryptor
 
 # 2. 安装 Python 依赖
@@ -48,6 +48,44 @@ pip install -e .
 ```
 
 安装后即可在任意位置使用 `qqmusic-decrypt`、`qqmusic-meta`、`qqmusic-gui` 命令。🎉
+
+---
+
+## 🪟 直接使用可执行程序（Windows）
+
+已打包好的程序位于 `dist/QQMusicDecryptor/`：
+
+| 程序 | 说明 |
+|------|------|
+| `QQMusicDecryptor.exe` | 🖥️ 图形界面版，双击启动，无控制台 |
+| `QQMusicDecryptor-Admin.exe` | 🛡️ 管理员可见版，双击后通过 UAC 请求管理员权限，显示日志并执行解密 |
+
+两个程序都会读取 **exe 所在目录（程序根目录）的 `config.ini`**，而不是当前工作目录；修改 `[PATHS]` 中的 `input_dir` / `output_dir` 后保存即可生效。
+
+```ini
+[PATHS]
+input_dir = D:\Music\QQMusic\Download
+output_dir = D:\Music\QQMusic\Decrypted
+```
+
+如果不确定程序实际读取的是哪个文件、哪个目录，可以运行：
+
+```bash
+QQMusicDecryptor-Admin.exe --info
+```
+
+它会列出程序根目录、实际加载的 `config.ini`、输入/输出目录、日志位置，且不会执行解密。
+
+自行构建可执行程序：
+
+```bash
+pip install -r requirements.txt pyinstaller
+python build_exe.py
+```
+
+产物：`dist/QQMusicDecryptor/` 与 `dist/QQMusicDecryptor-windows-x64.zip`。
+
+> 🐞 已修复：此前命令行版本和打包后的 exe 在没有显式传 `--config` 时不会读取根目录的 `config.ini`，而是退回硬编码的 `G:\QQMusic\...` 默认路径。
 
 ---
 
@@ -120,12 +158,44 @@ python src/main_cli.py --verbose
 input_dir = G:\QQMusic\Download\VipSongsDownload
 output_dir = G:\QQMusic\Decrypted
 
+[OUTPUT]
+# album = 按专辑分文件夹（推荐）
+# artist = 按歌手分文件夹
+# flat = 不分文件夹
+folder_mode = album
+
 [OPTIONS]
 max_retries = 3
 preserve_structure = true
 skip_existing = true
 delete_source = true
 ```
+
+### 📂 输出整理方式
+
+QQ 音乐的下载目录通常按「歌手/专辑」存放，同一张专辑如果有很多合作歌手，会被拆成多个歌手文件夹。`[OUTPUT] folder_mode` 控制解密后的整理方式：
+
+| 值 | 效果 |
+|----|------|
+| `album` | 🎵 按专辑分文件夹：把同一张专辑散落在不同歌手文件夹中的曲目合并，文件名按音轨号排序（`01 歌名.flac`），歌词同步改名并修正 `[ti]/[ar]/[al]` |
+| `artist` | 🎤 按主歌手分文件夹：每首歌取第一主歌手，文件夹内按歌名排序 |
+| `flat` | 📁 不分文件夹：所有歌曲直接放在输出目录，文件名使用「歌手 - 歌名」 |
+
+图形界面可以直接在「输出整理」下拉框中选择；管理员版也可以用 `--layout` 指定。
+
+### 🧹 整理已有输出目录
+
+如果之前已经解密过、但文件夹很乱，不需要重新解密：
+
+```bash
+# 按专辑整理已有文件（会移动音频和歌词、合并专辑文件夹、清理空目录）
+QQMusicDecryptor-Admin.exe --reorganize --layout album
+
+# 只预览会移动到哪里，不修改任何文件
+QQMusicDecryptor-Admin.exe --reorganize --layout album --dry-run
+```
+
+图形界面中也可以点击「整理已有文件」按钮。
 
 补充元数据时也可直接传参：
 
@@ -200,4 +270,5 @@ QQ 音乐的加密文件采用私有格式，只能由 QQ Music 进程本身解�
 
 - [Frida](https://frida.re/) — 动态插桩工具包
 - [mutagen](https://mutagen.readthedocs.io/) — 音频元数据处理
+- [FountainChan/qqmusic-decryptor](https://github.com/FountainChan/qqmusic-decryptor) — 上游项目，本仓库基于它继续开发。
 - [strelitzia-reg/qqmusic-decryptor](https://github.com/strelitzia-reg/qqmusic-decryptor) — 本项目的原项目和灵感来源。GUI 界面（`src/gui/`）修改自该项目。感谢！🙌
