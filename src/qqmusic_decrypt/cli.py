@@ -31,7 +31,7 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from app_paths import get_app_root, load_config, resolve_path
+from app_paths import get_app_root, load_config, resolve_path  # noqa: E402
 
 _PROJECT_ROOT = get_app_root()
 
