@@ -19,6 +19,13 @@ import subprocess
 import sys
 import zipfile
 
+# GitHub Actions 的 Windows runner 默认使用 cp1252，打印中文会报错
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST_NAME = "QQMusicDecryptor"
 DIST_DIR = os.path.join(ROOT, "dist", DIST_NAME)
